@@ -1,0 +1,65 @@
+name: build-aidl-aarch64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    steps:
+      - name: Install deps
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates clang g++ bison flex make \
+            pkg-config file binutils \
+            android-libbase-dev android-liblog-dev libgtest-dev
+
+      - name: Assert aarch64 host
+        run: |
+          set -e
+          test "$(uname -m)" = "aarch64"
+          clang++ -dumpmachine | grep -q aarch64
+
+      - name: Clone aidl android-17.0.0_r1
+        run: |
+          git clone --depth=1 --branch android-17.0.0_r1 \
+            https://android.googlesource.com/platform/system/tools/aidl src
+
+      - name: Build
+        working-directory: src
+        run: |
+          set -ex
+          bison -d --defines=aidl_language_y.h -o aidl_language_y.cpp aidl_language_y.yy
+          ls -la aidl_language_y.* location.hh position.hh 2>&1 || true
+          flex -o aidl_language_l.cpp aidl_language_l.ll
+          SRCS="aidl_checkapi aidl_const_expressions aidl_dumpapi aidl_language aidl_language_y aidl_language_l aidl_to_common aidl_to_cpp_common aidl_to_cpp aidl_to_java aidl_to_ndk aidl_to_rust aidl_typenames aidl ast_java check_valid code_writer comments diagnostics generate_aidl_mappings generate_cpp generate_cpp_analyzer generate_java_binder generate_java generate_ndk generate_rust import_resolver io_delegate location logging options parser permission preprocess main"
+          for s in $SRCS; do
+            clang++ -std=c++20 -O2 -w -DPLATFORM_SDK_VERSION=37 \
+              -I. -Iinclude -I/usr/include/android \
+              -c $s.cpp -o $s.o
+          done
+          MA="$(clang++ -dumpmachine | sed 's/-unknown//')"
+          echo "multiarch: $MA"
+          dpkg -L android-libbase-dev android-liblog-dev | grep -E "\.(so|a)(\.[0-9.]+)?$" || true
+          ls -la /usr/lib/$MA/android/ || true
+          clang++ -o aidl *.o -static-libstdc++ -static-libgcc \
+            -L/usr/lib/$MA/android -Wl,-rpath,/usr/lib/$MA/android \
+            -lbase -llog -lpthread
+
+      - name: Verify output is aarch64
+        working-directory: src
+        run: |
+          set -ex
+          file aidl
+          readelf -h aidl | tee elf-header.txt
+          grep -q "Machine:.*AArch64" elf-header.txt
+          file aidl | grep -q "ARM aarch64"
+          ldd aidl
+          ./aidl --help 2>&1 | head -5
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: aidl-aarch64
+          path: src/aidl
